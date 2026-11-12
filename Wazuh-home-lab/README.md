@@ -116,3 +116,67 @@ L'alert non ha un Event ID di Windows, perché non arriva dal registro eventi: �
 
 - Hardening CIS su win10 (blocco account, cronologia password, AutoPlay) e confronto del punteggio prima e dopo
 - Scenario 2: attacco da Kali Linux con cattura del traffico in Wireshark
+
+Scenario 2 – Brute force SMB rilevato da Wazuh
+Obiettivo: verificare che il lab rilevi un attacco di brute force sulle credenziali portato da una macchina esterna, lo classifichi come tale e permetta di risalire all'attaccante.
+Preparazione
+Prima dell'attacco ho predisposto l'ambiente con tre passaggi:
+Telemetria. Installato Sysmon sulla win10 con la configurazione di SwiftOnSecurity e integrato il suo canale nell'agent, aggiungendo in `ossec.conf` il blocco `<localfile>` con location `Microsoft-Windows-Sysmon/Operational`. Questo arricchisce i log endpoint oltre a quelli standard di Windows.
+Isolamento del bersaglio. Convertito l'account della win10 da account Microsoft ad account locale (`labuser`), per scollegare la macchina sotto attacco dalla mia identità reale.
+Superficie esposta. Aperta la porta SMB (445) in ingresso, per simulare un host raggiungibile. Di default Windows la blocca, quindi ho creato una regola apposta:
+```powershell
+New-NetFirewallRule -DisplayName "Lab SMB" -Direction Inbound -Protocol TCP -LocalPort 445 -Action Allow
+```
+Esecuzione
+Attacco dalla Kali (`10.0.2.6`) contro l'utente `labuser` della win10 (`10.0.2.5`), con una lista di password errate. Non serve indovinare la password: bastano i tentativi falliti per generare i log di sicurezza.
+```bash
+msfconsole -q -x "use auxiliary/scanner/smb/smb_login; \
+set RHOSTS 10.0.2.5; set SMBUser labuser; \
+set PASS_FILE passwords.txt; set VERBOSE true; \
+set STOP_ON_SUCCESS false; run; exit"
+```
+Output (troncato):
+```
+[*] 10.0.2.5:445 - Starting SMB login bruteforce
+[-] 10.0.2.5:445 - Failed: '.\labuser:password'
+[-] 10.0.2.5:445 - Failed: '.\labuser:123456'
+...
+[-] 10.0.2.5:445 - Account lockout detected on 'labuser', skipping this user.
+[*] 10.0.2.5:445 - Bruteforce completed, 0 credentials were successful.
+```
+Dopo una decina di tentativi Metasploit ha segnalato `Account lockout detected`: la win10 aveva già bloccato l'account.
+Problemi incontrati
+Problema	Causa	Soluzione
+`nxc` (NetExec) in crash all'avvio	Dipendenza Python rotta (`httpcore`/`typing`) nell'installazione	Cambiato strumento
+`hydra` SMB: "invalid reply from target"	Modulo SMB di hydra troppo vecchio per l'SMB di Windows 10	Cambiato strumento
+Scelta finale	—	`auxiliary/scanner/smb/smb_login` di Metasploit, che gestisce bene l'SMB moderno
+Rilevamento
+Sul dashboard Wazuh l'attacco è comparso su tre livelli:
+10 eventi 4625 (accesso non riuscito), uno per ogni tentativo, livello basso.
+1 alert correlato 60204 "Multiple Windows Logon Failures", livello 10, che unisce i tanti fallimenti in un unico segnale di attacco.
+1 alert 60115 "User account locked out (multiple login errors)", evento 4740: la difesa che è scattata.
+![I 10 eventi 4625 generati dal brute force, con l'IP sorgente 10.0.2.6](img/scenario2-4625.png)
+![Alert correlato 60204 e lockout 60115 in Threat Hunting](img/scenario2-alert.png)
+Analisi dell'alert correlato (60204)
+Campo	Valore	Significato
+rule.id	60204	Regola Wazuh per i fallimenti di login ripetuti
+rule.level	10	Gravità medio-alta: è il pattern, non il singolo errore
+rule.frequency	8	Scatta dopo 8 fallimenti nella finestra temporale
+rule.mitre.id	T1110	Brute Force
+rule.mitre.tactic	Credential Access	Tattica: accesso alle credenziali
+rule.groups	authentication_failures	Gruppo della regola
+compliance	PCI DSS 10.2.4 / 10.2.5, HIPAA, NIST 800-53 AU.14/AC.7/SI.4, GDPR	Mappatura ai requisiti normativi
+Analisi di un singolo evento (4625)
+Campo	Valore	Significato
+data.win.system.eventID	4625	Accesso a un account non riuscito
+data.win.eventdata.logonType	3	Accesso di rete: l'attacco arriva via SMB, non in locale
+data.win.eventdata.targetUserName	labuser	Utente preso di mira
+data.win.eventdata.ipAddress	10.0.2.6	IP sorgente: la Kali. È l'attribuzione dell'attacco
+data.win.eventdata.subStatus	0xc000006a	Password errata su un utente esistente
+data.win.eventdata.authenticationPackageName	NTLM	Protocollo di autenticazione usato
+![Dettaglio dell'alert con IP sorgente 10.0.2.6, logonType 3 e MITRE T1110](img/scenario2-dettaglio.png)
+Considerazioni
+Il singolo 4625 ha gravità bassa, perché un login fallito può essere un utente distratto. Il segnale vero è la ripetizione ravvicinata, che fa scattare la regola correlata 60204 mappata su Brute Force.
+Il campo `ipAddress` chiude il cerchio dell'indagine: non solo "c'è stato un brute force", ma "è partito da 10.0.2.6". Questa è l'attribuzione, il passo che un analista SOC deve sempre fare.
+Il lockout dell'account (evento 4740, regola 60115) mostra un controllo di sicurezza che reagisce da solo, ed è a sua volta un evento da monitorare, mappato su T1110 e T1531 (Account Access Removal).
+I tag di compliance su ogni alert permettono di collegare l'evento tecnico ai requisiti normativi, cosa utile in un contesto aziendale.
