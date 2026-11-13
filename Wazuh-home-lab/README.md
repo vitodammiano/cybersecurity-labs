@@ -180,3 +180,37 @@ Il singolo 4625 ha gravità bassa, perché un login fallito può essere un utent
 Il campo `ipAddress` chiude il cerchio dell'indagine: non solo "c'è stato un brute force", ma "è partito da 10.0.2.6". Questa è l'attribuzione, il passo che un analista SOC deve sempre fare.
 Il lockout dell'account (evento 4740, regola 60115) mostra un controllo di sicurezza che reagisce da solo, ed è a sua volta un evento da monitorare, mappato su T1110 e T1531 (Account Access Removal).
 I tag di compliance su ogni alert permettono di collegare l'evento tecnico ai requisiti normativi, cosa utile in un contesto aziendale.
+
+Scenario 3 – Analisi di rete del brute force con Wireshark
+Obiettivo: osservare a livello di pacchetti lo stesso brute force SMB dello Scenario 2, catturando il traffico da entrambi i lati (vittima e attaccante), per capire come appare l'attacco sul filo e collegarlo agli alert di Wazuh.
+Setup
+Wireshark con Npcap installato sulla win10 (vittima); Wireshark già presente sulla Kali (attaccante).
+Cattura avviata prima dell'attacco e in contemporanea: sulla win10 sull'interfaccia della labnet, sulla Kali su `eth0`.
+Snapshot pulito della win10 ("con tool") scattato prima di lanciare l'attacco, per poter ripristinare l'ambiente.
+Filtro di visualizzazione usato per isolare l'attacco: `tcp.port == 445`.
+Ciclo di vita di un tentativo
+Per ogni password provata, nel traffico si ripete sempre questa sequenza:
+Handshake TCP (SYN, SYN-ACK, ACK) verso la porta 445: la connessione viene aperta.
+Negotiate Protocol (SMB poi SMB2): client e server concordano la versione del protocollo.
+Session Setup Request, NTLMSSP_NEGOTIATE: l'attaccante avvia l'autenticazione NTLM.
+Session Setup Response, STATUS_MORE_PROCESSING_REQUIRED (NTLMSSP_CHALLENGE): nonostante l'etichetta "Error", non è un fallimento. È la sfida (challenge) che il server invia, un passo normale dell'handshake NTLM.
+Session Setup Request, NTLMSSP_AUTH, User: .\labuser: l'attaccante risponde alla sfida con le credenziali. Qui il nome utente è visibile in chiaro.
+Session Setup Response, STATUS_LOGON_FAILURE: l'esito. Il server rifiuta perché la password è sbagliata. È il login fallito così come appare sul filo.
+TCP RST dal server che chiude la connessione, poi un nuovo SYN da una porta sorgente diversa apre il tentativo successivo.
+![Vista della vittima (win10): il ciclo completo di un tentativo, fino a STATUS_LOGON_FAILURE](img/scenario3-vittima.png)
+Vittima e attaccante a confronto
+Le due catture sono l'immagine speculare l'una dell'altra, perché Kali e win10 sono sullo stesso segmento di rete.
+Dalla vittima si vede l'attacco arrivare; dall'attaccante si vede la propria macchina (10.0.2.6) ricevere i `STATUS_LOGON_FAILURE` e passare subito al tentativo dopo.
+Le porte sorgente che cambiano a ogni giro (43059, 34681, 46051...) confermano che ogni tentativo è una connessione TCP nuova di zecca.
+![Vista dell'attaccante (Kali): stesso scambio dal lato di chi attacca](img/scenario3-attaccante.png)
+Cosa si vede e cosa no
+In chiaro: il nome utente provato (`labuser`) e l'esito di ogni tentativo.
+Non in chiaro: la password, che viaggia come risposta cifrata alla sfida dentro il blocco NTLMSSP. Un difensore quindi riconosce l'attacco e il bersaglio, ma non ricava la password direttamente dal traffico.
+La firma del brute force
+Una connessione nuova per ogni password, una dozzina di cicli identici uno dietro l'altro in pochi secondi, tutti chiusi da `STATUS_LOGON_FAILURE`. È un ritmo che nessun utente umano produce: è proprio la ripetizione a rendere l'attacco riconoscibile.
+Collegamento con Wazuh
+Ogni `STATUS_LOGON_FAILURE` visto qui corrisponde a un evento 4625 registrato da Wazuh, e la somma di quei fallimenti è ciò che ha fatto scattare l'alert correlato "Multiple Windows Logon Failures" (regola 60204, MITRE T1110). Lo stesso attacco letto a tre livelli: pacchetto, evento, alert.
+Difese
+Non esporre mai SMB (porta 445) fuori dalla rete interna.
+Password robuste e lockout dell'account (già attivo nel lab) per fermare il brute force.
+Monitoraggio: gli alert correlati sui login falliti ripetuti sono il modo pratico di accorgersi dell'attacco.
