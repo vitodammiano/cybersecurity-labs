@@ -7,5 +7,6 @@ Laboratori pratici di cybersecurity svolti in ambiente virtualizzato (VirtualBox
 | Home lab SOC con Wazuh | SIEM, analisi alert, MITRE ATT&CK, triage, CIS Benchmark | [Writeup](Wazuh-home-lab/)
 | Segmentazione di rete con pfSense | Firewall, subnet, regole ICMP/TCP | [PDF](Report_pfSense_segmentazione_firewall.pdf) |
 | Exploitation PostgreSQL su Metasploitable2 | Nmap, Metasploit, remediation | [PDF](Report_exploit_PostgreSQL_Metasploitable2.pdf) |
+| Analisi SPF, DKIM e DMARC | Email security, autenticazione, triage phishing | [Writeup](email-authentication-analysis/) |
 
 Certificazioni: CompTIA Security+, Cisco CCST Cybersecurity
